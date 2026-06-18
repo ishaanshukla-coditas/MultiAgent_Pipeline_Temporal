@@ -14,3 +14,7 @@ wheels/
 
 # Temporal local DB
 temporal-dev.db
+
+# Claude Code skills/agents (not part of the project)
+.agents/
+skills-lock.json

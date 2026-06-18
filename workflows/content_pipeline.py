@@ -1,16 +1,13 @@
+import asyncio
 import logging
 from datetime import timedelta
 from dataclasses import dataclass
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-import asyncio
-import logging
-from datetime import timedelta
 
 with workflow.unsafe.imports_passed_through():
     from agents.research_agent import run_research_agent, ResearchBrief
     from agents.competitor_agent import run_competitor_agent, CompetitorBrief
-    from agents.seo_agent import run_seo_agent, SEOBrief
     from agents.writer_agent import run_writer_agent, ArticleOutput
 
 logger = logging.getLogger(__name__)
@@ -35,41 +32,43 @@ class ContentPipelineWorkflow:
 
     def __init__(self):
         self._status = "started"
-        self._research_done = False
-        self._competitor_done = False
-        self._seo_brief = None
+        self._article: ArticleOutput | None = None
         self._approved = False
-        self._rejection_feedback = None
+        self._rejection_feedback: str | None = None
 
-    # ── SIGNALS ─────────────────────────────────────────
+    # ── Signals ──────────────────────────────────────────────
 
     @workflow.signal
     async def approve_article(self):
-        """You send this signal when you approve the article"""
         self._approved = True
-        workflow.logger.info("Article approved by user")
+        workflow.logger.info("Article approved")
 
     @workflow.signal
     async def reject_article(self, feedback: str):
-        """You send this signal to request changes"""
         self._rejection_feedback = feedback
         workflow.logger.info(f"Article rejected: {feedback}")
 
-    # ── QUERIES ─────────────────────────────────────────
+    # ── Queries ───────────────────────────────────────────────
 
     @workflow.query
     def get_status(self) -> str:
         return self._status
 
     @workflow.query
-    def get_seo_brief(self) -> dict:
-        return self._seo_brief or {}
+    def get_article(self) -> dict:
+        if self._article is None:
+            return {}
+        return {
+            "title": self._article.title,
+            "content": self._article.content,
+            "meta_description": self._article.meta_description,
+            "word_count": self._article.word_count,
+        }
 
-    # ── MAIN RUN ────────────────────────────────────────
+    # ── Main run ──────────────────────────────────────────────
 
     @workflow.run
     async def run(self, input: PipelineInput) -> PipelineResult:
-
         retry_policy = RetryPolicy(
             initial_interval=timedelta(seconds=2),
             backoff_coefficient=2.0,
@@ -77,72 +76,45 @@ class ContentPipelineWorkflow:
             maximum_interval=timedelta(seconds=30),
         )
 
-        # ── Step 1: Run Research + Competitor IN PARALLEL ──
+        # Step 1 — Research + Competitor in parallel
         self._status = "running_research_and_competitor"
-        workflow.logger.info("Starting Research and Competitor agents in parallel")
+        workflow.logger.info("Research and Competitor agents starting in parallel")
 
-        # Start both at the same time
-        research_handle = workflow.execute_activity(
-            run_research_agent,
-            input.topic,
-            start_to_close_timeout=timedelta(minutes=5),
-            heartbeat_timeout=timedelta(seconds=30),
-            retry_policy=retry_policy,
-        )
-
-        competitor_handle = workflow.execute_activity(
-            run_competitor_agent,
-            input.topic,
-            start_to_close_timeout=timedelta(minutes=5),
-            heartbeat_timeout=timedelta(seconds=30),
-            retry_policy=retry_policy,
-        )
-
-        
         research_brief, competitor_brief = await asyncio.gather(
-            research_handle,
-            competitor_handle,
+            workflow.execute_activity(
+                run_research_agent,
+                input.topic,
+                start_to_close_timeout=timedelta(minutes=5),
+                heartbeat_timeout=timedelta(seconds=30),
+                retry_policy=retry_policy,
+            ),
+            workflow.execute_activity(
+                run_competitor_agent,
+                input.topic,
+                start_to_close_timeout=timedelta(minutes=5),
+                heartbeat_timeout=timedelta(seconds=30),
+                retry_policy=retry_policy,
+            ),
         )
 
-        workflow.logger.info("Both agents completed")
-        self._research_done = True
-        self._competitor_done = True
+        workflow.logger.info("Research and Competitor completed")
 
-        # ── Step 2: Run SEO Agent ─────────────────────────
-        self._status = "running_seo_agent"
-        workflow.logger.info("Starting SEO agent")
-
-        seo: SEOBrief = await workflow.execute_activity(
-            run_seo_agent,
-            args=[input.topic, research_brief, competitor_brief],
-            start_to_close_timeout=timedelta(minutes=5),
-            heartbeat_timeout=timedelta(seconds=30),
-            retry_policy=retry_policy,
-        )
-
-        self._seo_brief = {
-            "primary_keyword": seo.primary_keyword,
-            "secondary_keywords": seo.secondary_keywords,
-            "search_intent": seo.search_intent,
-            "suggested_headings": seo.suggested_headings,
-            "meta_description": seo.meta_description,
-            "target_word_count": seo.target_word_count,
-        }
-        workflow.logger.info("SEO agent completed")
-
-        # ── Step 3: Write the article ─────────────────────
+        # Step 2 — Writer agent (SEO strategy + article in one call)
         self._status = "writing_article"
-        workflow.logger.info("Writer agent starting")
+        workflow.logger.info("Writer Agent starting (SEO + article, 1 LLM call)")
 
         article: ArticleOutput = await workflow.execute_activity(
             run_writer_agent,
-            args=[input.topic, research_brief, competitor_brief, seo],
+            args=[input.topic, research_brief, competitor_brief],
             start_to_close_timeout=timedelta(minutes=10),
             heartbeat_timeout=timedelta(seconds=60),
             retry_policy=retry_policy,
         )
 
-        # ── Step 4: Pause for human approval ─────────────
+        self._article = article
+        workflow.logger.info(f"Article ready: {article.title}")
+
+        # Step 3 — Human approval gate
         self._status = "waiting_for_approval"
         workflow.logger.info("Waiting for human approval")
 
@@ -151,12 +123,8 @@ class ContentPipelineWorkflow:
             timeout=timedelta(hours=48),
         )
 
-        if self._rejection_feedback:
-            self._status = "rejected"
-            workflow.logger.info("Article rejected by user")
-        else:
-            self._status = "completed"
-            workflow.logger.info("Article approved and completed")
+        self._status = "rejected" if self._rejection_feedback else "completed"
+        workflow.logger.info(f"Pipeline finished with status: {self._status}")
 
         return PipelineResult(
             topic=input.topic,

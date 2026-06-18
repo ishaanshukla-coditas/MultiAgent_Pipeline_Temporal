@@ -10,7 +10,6 @@ from temporalio.worker import Worker
 from workflows.content_pipeline import ContentPipelineWorkflow
 from agents.research_agent import run_research_agent
 from agents.competitor_agent import run_competitor_agent
-from agents.seo_agent import run_seo_agent
 from agents.writer_agent import run_writer_agent
 
 logging.basicConfig(level=logging.INFO)
@@ -30,13 +29,13 @@ async def main():
         activities=[
             run_research_agent,
             run_competitor_agent,
-            run_seo_agent,
-            run_writer_agent,
+            run_writer_agent,   # now handles SEO + writing in 1 LLM call
         ],
     )
 
     logger.info(f"Worker started on queue: {TASK_QUEUE}")
-    logger.info("Open http://localhost:8233 to see workflows")
+    logger.info("Registered activities: research, competitor, writer (SEO merged)")
+    logger.info("Total LLM calls per pipeline: 3 (down from 8)")
     await worker.run()
 
 

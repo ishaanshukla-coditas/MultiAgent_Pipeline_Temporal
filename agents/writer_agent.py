@@ -1,9 +1,8 @@
 import logging
 from dataclasses import dataclass
-from agents.llm_client import call_llm
+from agents.llm_client import call_llm_json
 from agents.research_agent import ResearchBrief
 from agents.competitor_agent import CompetitorBrief
-from agents.seo_agent import SEOBrief
 from temporalio import activity
 
 logger = logging.getLogger(__name__)
@@ -17,103 +16,73 @@ class ArticleOutput:
     content: str
     word_count: int
 
+
+# Stable system prompt — same text for every write request so provider-side
+# prefix caching applies. All dynamic data goes in the user prompt only.
+_SYSTEM = (
+    "You are an expert content writer and SEO strategist. "
+    "You write articles that rank in both traditional search and AI-generated answers. "
+    "Use clear extractable content blocks, direct answers, and specific facts. "
+    "Always respond with valid JSON only."
+)
+
+
 @activity.defn
 async def run_writer_agent(
     topic: str,
     research: ResearchBrief,
     competitor: CompetitorBrief,
-    seo: SEOBrief,
 ) -> ArticleOutput:
     """
-    Takes all 3 briefs and writes a complete article.
-
-    Step 1: Generate the best title
-    Step 2: Write the full article using all briefs
-    Step 3: Return structured article output
+    Generates SEO strategy + article title + full article body in a single
+    structured JSON call. Replaces the previous separate SEO agent (3 calls)
+    and writer agent (2 calls) — now 1 call total.
     """
-
     logger.info(f"Writer Agent starting for topic: {topic}")
 
-    # Step 1 — Generate title
-    title_prompt = f"""
-    Topic: {topic}
-    Primary keyword: {seo.primary_keyword}
-    Search intent: {seo.search_intent}
+    prompt = f"""Topic: {topic}
 
-    Write ONE compelling article title that:
-    - Includes the primary keyword naturally
-    - Is under 60 characters
-    - Matches the search intent
-    - Makes people want to click
+RESEARCH FINDINGS:
+{research.key_facts}
 
-    Return only the title, nothing else.
-    """
+COMPETITOR CONTENT GAPS:
+{competitor.content_gaps}
 
-    title = await call_llm(
-        prompt=title_prompt,
-        system="You are an expert headline writer for SEO content."
-    )
-    title = title.strip().strip('"')
-    logger.info(f"Generated title: {title}")
+UNIQUE ANGLES TO COVER:
+{competitor.opportunities}
 
-    # Step 2 — Write the full article
-    headings = "\n".join([f"- {h}" for h in seo.suggested_headings])
-    secondary_kw = ", ".join(seo.secondary_keywords)
+You are both the SEO strategist and the article writer. Produce both in a single response.
 
-    article_prompt = f"""
-    Write a complete, high-quality article with these specifications:
+Return a JSON object with exactly these keys:
+{{
+  "primary_keyword": "the main keyword phrase to target (2-4 words)",
+  "meta_description": "SEO meta description under 155 characters that includes the primary keyword and makes people want to click",
+  "title": "compelling article title under 60 characters that includes the primary keyword naturally",
+  "content": "the full article in Markdown — minimum 800 words, with ## headings (5-6 sections), short paragraphs (2-3 sentences), specific facts from the research, and a strong introduction and conclusion"
+}}
 
-    TOPIC: {topic}
-    TITLE: {title}
-    TARGET WORD COUNT: {seo.target_word_count} words
+Content requirements:
+- Each ## section directly answers a specific reader question
+- Address every competitor gap identified above
+- Include at least 3 specific statistics or concrete facts from the research
+- Clear definitions for key terms
+- Short paragraphs — maximum 3 sentences each
+- Strong actionable conclusion with key takeaways"""
 
-    SEO REQUIREMENTS:
-    - Primary keyword: {seo.primary_keyword}
-    - Secondary keywords to use naturally: {secondary_kw}
-    - Search intent: {seo.search_intent}
+    data = await call_llm_json(prompt=prompt, system=_SYSTEM)
 
-    USE THESE HEADINGS:
-    {headings}
-
-    RESEARCH TO INCLUDE:
-    {research.key_facts}
-
-    CONTENT GAPS TO ADDRESS:
-    {competitor.content_gaps}
-
-    UNIQUE ANGLES TO COVER:
-    {competitor.opportunities}
-
-    WRITING REQUIREMENTS:
-    - Clear, engaging, informative style
-    - Short paragraphs (2-3 sentences max)
-    - Include specific facts from research
-    - Each heading section is self-contained
-    - Strong introduction and conclusion
-    - Format in Markdown
-
-    AI SEO REQUIREMENTS:
-    - Each section directly answers a specific question
-    - Clear definitions for key terms
-    - At least 3 specific statistics or facts
-    - Content that AI systems can easily extract and cite
-    """
-
-    system = """You are an expert content writer specializing in
-    AI-optimized SEO content. You write articles that rank well
-    in both traditional search and AI-generated answers.
-    Always use clear extractable content blocks and direct answers."""
-
-    logger.info("Calling Gemma to write full article...")
-    content = await call_llm(prompt=article_prompt, system=system)
-
+    content = data.get("content", "")
     word_count = len(content.split())
-    logger.info(f"Article written. Word count: {word_count}")
+
+    logger.info(
+        f"Writer Agent completed (1 LLM call, was 5). "
+        f"Title: {data.get('title', '')} | Words: {word_count}"
+    )
 
     return ArticleOutput(
         topic=topic,
-        title=title,
-        meta_description=seo.meta_description,
+        title=data.get("title", topic),
+        meta_description=data.get("meta_description", ""),
         content=content,
         word_count=word_count,
     )

@@ -61,9 +61,18 @@ Return a JSON object with exactly these two keys:
 
     data = await call_llm_json(prompt=prompt, system=_SYSTEM)
 
+    # LLM sometimes returns a list for these fields despite the prompt asking for strings.
+    # Coerce to str so Temporal's dataclass deserializer never sees a type mismatch.
+    content_gaps = data.get("content_gaps", "")
+    opportunities = data.get("opportunities", "")
+    if isinstance(content_gaps, list):
+        content_gaps = "\n".join(f"- {item}" for item in content_gaps)
+    if isinstance(opportunities, list):
+        opportunities = "\n".join(f"- {item}" for item in opportunities)
+
     logger.info("Competitor Agent completed (1 LLM call, was 2)")
     return CompetitorBrief(
         topic=topic,
-        content_gaps=data.get("content_gaps", ""),
-        opportunities=data.get("opportunities", ""),
+        content_gaps=content_gaps,
+        opportunities=opportunities,
     )

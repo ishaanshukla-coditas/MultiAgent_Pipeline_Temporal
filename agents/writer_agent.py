@@ -71,7 +71,13 @@ Content requirements:
 
     data = await call_llm_json(prompt=prompt, system=_SYSTEM)
 
-    content = data.get("content", "")
+    # Coerce any fields the LLM may have returned as lists instead of strings
+    def _to_str(val, sep="\n") -> str:
+        if isinstance(val, list):
+            return sep.join(str(v) for v in val)
+        return str(val) if val else ""
+
+    content = _to_str(data.get("content", ""))
     word_count = len(content.split())
 
     logger.info(
@@ -81,8 +87,8 @@ Content requirements:
 
     return ArticleOutput(
         topic=topic,
-        title=data.get("title", topic),
-        meta_description=data.get("meta_description", ""),
+        title=_to_str(data.get("title", topic)),
+        meta_description=_to_str(data.get("meta_description", "")),
         content=content,
         word_count=word_count,
     )

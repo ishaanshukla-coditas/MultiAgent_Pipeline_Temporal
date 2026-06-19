@@ -11,6 +11,7 @@ from backend.services.temporal_service import (
 
 
 ARTICLE_STATUSES = {"waiting_for_approval", "completed", "rejected"}
+TERMINAL_STATUSES = {"completed", "rejected", "failed"}
 
 
 async def _sync_article(pipeline: Pipeline, db: Session) -> None:
@@ -26,19 +27,24 @@ async def _sync_article(pipeline: Pipeline, db: Session) -> None:
             db.refresh(pipeline)
 
 
-async def create_pipeline(topic: str, db: Session) -> Pipeline:
+async def create_pipeline(
+    topic: str,
+    db: Session,
+    simulate_writer_failure: bool = False,
+) -> Pipeline:
     pipeline_id = str(uuid.uuid4())[:8].upper()
 
     pipeline = Pipeline(
         pipeline_id=pipeline_id,
         topic=topic,
         status="started",
+        simulate_writer_failure=simulate_writer_failure,
     )
     db.add(pipeline)
     db.commit()
     db.refresh(pipeline)
 
-    run_id = await start_pipeline_workflow(pipeline_id, topic)
+    run_id = await start_pipeline_workflow(pipeline_id, topic, simulate_writer_failure)
 
     pipeline.temporal_workflow_id = f"pipeline-{pipeline_id}"
     pipeline.temporal_run_id = run_id
@@ -54,7 +60,7 @@ async def list_pipelines(db: Session) -> list[Pipeline]:
     ).all()
 
     for pipeline in pipelines:
-        if pipeline.status not in ["completed", "rejected"]:
+        if pipeline.status not in TERMINAL_STATUSES:
             live_status = await get_workflow_status(
                 pipeline.temporal_workflow_id
             )
@@ -73,7 +79,7 @@ async def get_pipeline(pipeline_id: str, db: Session) -> Pipeline:
     if not pipeline:
         return None
 
-    if pipeline.status not in ["completed", "rejected"]:
+    if pipeline.status not in TERMINAL_STATUSES:
         live_status = await get_workflow_status(
             pipeline.temporal_workflow_id
         )

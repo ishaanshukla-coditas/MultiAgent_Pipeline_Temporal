@@ -19,23 +19,37 @@ async def get_temporal_client() -> Client:
     return _client
 
 
-async def start_pipeline_workflow(pipeline_id: str, topic: str) -> str:
+async def start_pipeline_workflow(
+    pipeline_id: str,
+    topic: str,
+    simulate_writer_failure: bool = False,
+) -> str:
     client = await get_temporal_client()
     workflow_id = f"pipeline-{pipeline_id}"
 
     handle = await client.start_workflow(
         ContentPipelineWorkflow.run,
-        PipelineInput(topic=topic),
+        PipelineInput(topic=topic, simulate_writer_failure=simulate_writer_failure),
         id=workflow_id,
         task_queue=TASK_QUEUE,
     )
     return handle.result_run_id
 
 
+_FAILED_EXECUTION_STATES = {"FAILED", "TIMED_OUT", "CANCELED", "TERMINATED"}
+
+
 async def get_workflow_status(workflow_id: str) -> Optional[str]:
     try:
         client = await get_temporal_client()
         handle = client.get_workflow_handle(workflow_id)
+
+        desc = await handle.describe()
+        # desc.status is a proto enum — check its name to avoid import coupling
+        execution_state = desc.status.name.upper()
+        if any(s in execution_state for s in _FAILED_EXECUTION_STATES):
+            return "failed"
+
         return await handle.query(ContentPipelineWorkflow.get_status)
     except Exception:
         return None

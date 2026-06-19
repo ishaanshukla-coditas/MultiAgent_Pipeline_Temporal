@@ -4,6 +4,7 @@ from agents.llm_client import call_llm_json
 from agents.research_agent import ResearchBrief
 from agents.competitor_agent import CompetitorBrief
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +33,24 @@ async def run_writer_agent(
     topic: str,
     research: ResearchBrief,
     competitor: CompetitorBrief,
+    simulate_failure: bool = False,
 ) -> ArticleOutput:
     """
     Generates SEO strategy + article title + full article body in a single
     structured JSON call. Replaces the previous separate SEO agent (3 calls)
     and writer agent (2 calls) — now 1 call total.
     """
-    logger.info(f"Writer Agent starting for topic: {topic}")
+    attempt = activity.info().attempt
+    logger.info(f"Writer Agent starting for topic: {topic} (attempt {attempt})")
+
+    # Simulated failure on first attempt — Temporal retries only this activity;
+    # research and competitor results are replayed from event history, not re-run.
+    if simulate_failure and attempt == 1:
+        logger.warning("Simulated failure on attempt 1 — Temporal will retry this activity")
+        raise ApplicationError(
+            "Simulated writer failure on attempt 1",
+            non_retryable=False,
+        )
 
     prompt = f"""Topic: {topic}
 

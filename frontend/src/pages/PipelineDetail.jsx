@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Loader2, CheckCircle, XCircle, FileText, AlertCircle, Hash } from 'lucide-react'
+import { ArrowLeft, Loader2, CheckCircle, XCircle, FileText, AlertCircle, Hash, AlertTriangle } from 'lucide-react'
 import { getPipeline, approvePipeline, rejectPipeline } from '../api/pipelines.js'
 import StatusBadge from '../components/StatusBadge.jsx'
 import AgentProgress from '../components/AgentProgress.jsx'
 
-const TERMINAL_STATUSES = ['completed', 'rejected']
-const SHOW_PROGRESS_STATUSES = ['started', 'running_research_and_competitor', 'writing_article']
+const TERMINAL_STATUSES = ['completed', 'rejected', 'failed']
+const SHOW_PROGRESS_STATUSES = ['started', 'running_research_and_competitor', 'writing_article', 'failed']
 const SHOW_ARTICLE_STATUSES = ['writing_article', 'waiting_for_approval', 'completed', 'rejected']
 
 function ArticleContent({ content }) {
@@ -144,7 +144,12 @@ export default function PipelineDetail() {
         </div>
 
         {/* Agent Progress */}
-        {showProgress && <AgentProgress status={pipeline.status} />}
+        {showProgress && (
+          <AgentProgress
+            status={pipeline.status}
+            simulateFailure={pipeline.simulate_writer_failure}
+          />
+        )}
 
         {/* Article Preview */}
         {showArticle && pipeline.title && (
@@ -235,6 +240,27 @@ export default function PipelineDetail() {
             <div>
               <p className="font-semibold text-red-800">Article Rejected</p>
               <p className="text-sm text-red-600 mt-0.5">Revision has been requested.</p>
+            </div>
+          </div>
+        )}
+
+        {pipeline.status === 'failed' && (
+          <div className="flex items-start gap-3 bg-red-50 border border-red-300 rounded-xl px-6 py-4">
+            <AlertTriangle size={20} className="text-red-600 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-semibold text-red-800">Workflow Failed</p>
+              <p className="text-sm text-red-600 mt-0.5">
+                All retry attempts were exhausted. Check the{' '}
+                <a
+                  href={`http://localhost:8233/namespaces/default/workflows/${pipeline.temporal_workflow_id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline hover:text-red-800"
+                >
+                  Temporal UI
+                </a>
+                {' '}for the full failure trace.
+              </p>
             </div>
           </div>
         )}

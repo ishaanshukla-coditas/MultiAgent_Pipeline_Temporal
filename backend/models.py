@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Integer, Text, DateTime
+from sqlalchemy import String, Integer, Text, DateTime, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 from backend.database import Base
 
@@ -17,6 +17,7 @@ class Pipeline(Base):
     content: Mapped[str] = mapped_column(Text, nullable=True)
     meta_description: Mapped[str] = mapped_column(String, nullable=True)
     word_count: Mapped[int] = mapped_column(Integer, nullable=True)
+    simulate_writer_failure: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

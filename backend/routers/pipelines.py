@@ -12,7 +12,9 @@ async def create_pipeline(
     request: CreatePipelineRequest,
     db: Session = Depends(get_db)
 ):
-    pipeline = await pipeline_service.create_pipeline(request.topic, db)
+    pipeline = await pipeline_service.create_pipeline(
+        request.topic, db, request.simulate_writer_failure
+    )
     return pipeline
 
 

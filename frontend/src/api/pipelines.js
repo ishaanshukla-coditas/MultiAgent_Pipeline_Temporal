@@ -1,7 +1,7 @@
 import axios from 'axios'
 
-export const createPipeline = (topic) =>
-  axios.post('/api/pipelines', { topic }).then(r => r.data)
+export const createPipeline = (topic, simulateWriterFailure = false) =>
+  axios.post('/api/pipelines', { topic, simulate_writer_failure: simulateWriterFailure }).then(r => r.data)
 
 export const listPipelines = () =>
   axios.get('/api/pipelines').then(r => r.data)

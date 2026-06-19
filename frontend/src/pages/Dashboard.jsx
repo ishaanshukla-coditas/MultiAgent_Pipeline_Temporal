@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Zap, Loader2, AlertCircle, LayoutDashboard } from 'lucide-react'
+import { Zap, Loader2, AlertCircle, LayoutDashboard, FlaskConical } from 'lucide-react'
 import { createPipeline, listPipelines } from '../api/pipelines.js'
 import PipelineCard from '../components/PipelineCard.jsx'
 
@@ -11,6 +11,7 @@ const SUGGESTIONS = [
 
 export default function Dashboard() {
   const [topic, setTopic] = useState('')
+  const [simulateFailure, setSimulateFailure] = useState(false)
   const [pipelines, setPipelines] = useState([])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState(null)
@@ -37,8 +38,9 @@ export default function Dashboard() {
     setSubmitting(true)
     setError(null)
     try {
-      await createPipeline(topic.trim())
+      await createPipeline(topic.trim(), simulateFailure)
       setTopic('')
+      setSimulateFailure(false)
       await fetchPipelines()
     } catch (err) {
       setError(err.response?.data?.detail ?? 'Failed to start pipeline. Is the backend running?')
@@ -77,6 +79,33 @@ export default function Dashboard() {
               rows={3}
               className="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
             />
+            {/* Simulate failure toggle */}
+            <button
+              type="button"
+              onClick={() => setSimulateFailure(v => !v)}
+              className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-lg border transition-colors text-xs ${
+                simulateFailure
+                  ? 'bg-amber-50 border-amber-300 text-amber-800'
+                  : 'bg-white border-gray-200 text-gray-500 hover:border-gray-300'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <FlaskConical size={13} className={simulateFailure ? 'text-amber-600' : 'text-gray-400'} />
+                <div className="text-left">
+                  <p className={`font-medium leading-tight ${simulateFailure ? 'text-amber-800' : 'text-gray-600'}`}>
+                    Simulate writer failure
+                  </p>
+                  <p className={`text-xs leading-tight mt-0.5 ${simulateFailure ? 'text-amber-600' : 'text-gray-400'}`}>
+                    {simulateFailure ? 'Attempt 1 will fail · Temporal retries automatically' : 'Writer succeeds on first attempt'}
+                  </p>
+                </div>
+              </div>
+              {/* pill toggle */}
+              <div className={`relative w-8 h-4 rounded-full transition-colors flex-shrink-0 ${simulateFailure ? 'bg-amber-500' : 'bg-gray-200'}`}>
+                <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full shadow transition-transform ${simulateFailure ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </div>
+            </button>
+
             {error && (
               <div className="flex items-start gap-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
                 <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />

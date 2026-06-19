@@ -41,6 +41,13 @@ const STATUS_CONFIG = {
     dot: 'bg-red-500',
     pulse: false,
   },
+  failed: {
+    label: 'Failed',
+    bg: 'bg-red-100',
+    text: 'text-red-800',
+    dot: 'bg-red-600',
+    pulse: false,
+  },
 }
 
 export default function StatusBadge({ status }) {

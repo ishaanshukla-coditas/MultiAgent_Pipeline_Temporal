@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PipelineInput:
     topic: str
+    simulate_writer_failure: bool = False
 
 
 @dataclass
@@ -69,11 +70,23 @@ class ContentPipelineWorkflow:
 
     @workflow.run
     async def run(self, input: PipelineInput) -> PipelineResult:
-        retry_policy = RetryPolicy(
-            initial_interval=timedelta(seconds=2),
+        # Short 429s (≤60s) are handled inside the activity via sleep+heartbeat.
+        # Long 429s (quota exhaustion) surface here as ApplicationError so Temporal
+        # retries with backoff — initial_interval gives the first breathing room.
+        agent_retry_policy = RetryPolicy(
+            initial_interval=timedelta(seconds=30),
             backoff_coefficient=2.0,
             maximum_attempts=3,
-            maximum_interval=timedelta(seconds=30),
+            maximum_interval=timedelta(minutes=5),
+        )
+
+        # Writer gets more Temporal-level attempts to accommodate the simulated
+        # failure scenario (attempt 1 = artificial fail, attempt 2 = real call).
+        writer_retry_policy = RetryPolicy(
+            initial_interval=timedelta(seconds=30),
+            backoff_coefficient=2.0,
+            maximum_attempts=5,
+            maximum_interval=timedelta(minutes=5),
         )
 
         # Step 1 — Research + Competitor in parallel
@@ -84,16 +97,16 @@ class ContentPipelineWorkflow:
             workflow.execute_activity(
                 run_research_agent,
                 input.topic,
-                start_to_close_timeout=timedelta(minutes=5),
-                heartbeat_timeout=timedelta(seconds=30),
-                retry_policy=retry_policy,
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(seconds=60),
+                retry_policy=agent_retry_policy,
             ),
             workflow.execute_activity(
                 run_competitor_agent,
                 input.topic,
-                start_to_close_timeout=timedelta(minutes=5),
-                heartbeat_timeout=timedelta(seconds=30),
-                retry_policy=retry_policy,
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(seconds=60),
+                retry_policy=agent_retry_policy,
             ),
         )
 
@@ -105,10 +118,10 @@ class ContentPipelineWorkflow:
 
         article: ArticleOutput = await workflow.execute_activity(
             run_writer_agent,
-            args=[input.topic, research_brief, competitor_brief],
-            start_to_close_timeout=timedelta(minutes=10),
+            args=[input.topic, research_brief, competitor_brief, input.simulate_writer_failure],
+            start_to_close_timeout=timedelta(minutes=15),
             heartbeat_timeout=timedelta(seconds=60),
-            retry_policy=retry_policy,
+            retry_policy=writer_retry_policy,
         )
 
         self._article = article

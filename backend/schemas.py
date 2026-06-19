@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class CreatePipelineRequest(BaseModel):
     topic: str
+    simulate_writer_failure: bool = False
 
 
 class PipelineResponse(BaseModel):
@@ -16,6 +17,7 @@ class PipelineResponse(BaseModel):
     content: Optional[str] = None
     meta_description: Optional[str] = None
     word_count: Optional[int] = None
+    simulate_writer_failure: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}

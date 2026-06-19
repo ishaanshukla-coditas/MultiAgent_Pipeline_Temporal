@@ -1,6 +1,6 @@
 # Multi-Agent Content Pipeline
 
-A production-grade multi-agent pipeline that autonomously researches a topic, analyses competitors, generates SEO briefs, and writes a full article — orchestrated with [Temporal](https://temporal.io/) for durability and human-in-the-loop approval.
+A production-grade multi-agent pipeline that autonomously researches a topic, analyses competitors, and writes a full SEO-optimised article — orchestrated with [Temporal](https://temporal.io/) for durable execution and human-in-the-loop approval. Includes a React dashboard and a live demo of Temporal's activity-level fault tolerance.
 
 ## Architecture
 
@@ -8,137 +8,157 @@ A production-grade multi-agent pipeline that autonomously researches a topic, an
 Topic Input
     │
     ├──► Research Agent  ──┐
-    │    (DuckDuckGo +     │  (parallel)
+    │    (DuckDuckGo +     │  parallel
     │     Groq LLM)        │
     │                      ▼
-    └──► Competitor Agent ─► SEO Agent ──► Writer Agent ──► Human Approval
-         (DuckDuckGo +         (Groq)         (Groq)         (Temporal Signal)
-          Groq LLM)
+    └──► Competitor Agent ──► Writer Agent ──► Human Approval
+         (DuckDuckGo +        (SEO strategy       (Temporal Signal
+          Groq LLM)            + full article,      via React UI)
+                               1 LLM call)
 ```
 
 | Agent | Role |
 |---|---|
-| **Research Agent** | Searches the web via DuckDuckGo, summarises key facts and trends |
-| **Competitor Agent** | Finds competing content, identifies gaps and opportunities |
-| **SEO Agent** | Auto-generates primary keyword, secondary keywords, headings, and meta description |
-| **Writer Agent** | Writes a full SEO-optimised article using all three briefs |
+| **Research Agent** | Searches DuckDuckGo, summarises key facts and trends via Groq |
+| **Competitor Agent** | Finds competing content, identifies gaps and opportunities via Groq |
+| **Writer Agent** | Generates SEO keyword strategy + full article in a single Groq call |
 
-Research and Competitor agents run **in parallel**. SEO and Writer agents run sequentially after both complete. The workflow then pauses for human approval before completing.
+Research and Competitor agents run **in parallel**. Writer runs after both complete. The workflow pauses for human approval (approve or reject with feedback) before completing.
 
 ## Tech Stack
 
-- **[Temporal](https://temporal.io/)** — workflow orchestration, retries, and durable execution
-- **[Groq API](https://console.groq.com/)** — fast LLM inference (`llama-3.3-70b-versatile`)
-- **[DuckDuckGo Search](https://pypi.org/project/duckduckgo-search/)** — real-time web search
-- **[FastAPI](https://fastapi.tiangolo.com/)** — backend API
-- **[uv](https://docs.astral.sh/uv/)** — Python package manager
+| Layer | Technology |
+|---|---|
+| Workflow orchestration | [Temporal](https://temporal.io/) |
+| LLM inference | [Groq API](https://console.groq.com/) — `llama-3.3-70b-versatile` |
+| Web search | [DuckDuckGo Search](https://pypi.org/project/duckduckgo-search/) |
+| Backend API | [FastAPI](https://fastapi.tiangolo.com/) + SQLAlchemy + PostgreSQL |
+| Frontend | React + Vite + Tailwind CSS |
+| Containerisation | Docker Compose |
+| Python package manager | [uv](https://docs.astral.sh/uv/) |
 
 ## Prerequisites
 
-- Python 3.14+
-- [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- [Temporal CLI](https://docs.temporal.io/cli) (for running the local Temporal server)
-- A [Groq API key](https://console.groq.com/)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose)
+- A free [Groq API key](https://console.groq.com/) — sign up at console.groq.com
 
-## Setup
+That's it. Everything else runs inside Docker.
+
+## Quick Start
 
 **1. Clone the repo**
 ```bash
-git clone https://github.com/YOUR_USERNAME/MultiAgent_Pipeline.git
-cd MultiAgent_Pipeline
+git clone https://github.com/ishaanshukla-coditas/MultiAgent_Pipeline_Temporal.git
+cd MultiAgent_Pipeline_Temporal
 ```
 
-**2. Install dependencies**
-```bash
-uv sync
-```
-
-**3. Configure environment variables**
-
-Copy the example env file and fill in your credentials:
+**2. Create your `.env` file**
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Edit `.env` and add your Groq API key:
 ```env
-TEMPORAL_HOST=localhost:7233
-TEMPORAL_TASK_QUEUE=content-pipeline-queue
-
 GROQ_API_KEY=your_groq_api_key_here
 GROQ_MODEL=llama-3.3-70b-versatile
-
-ENVIRONMENT=development
 ```
 
-Get your free Groq API key at [console.groq.com](https://console.groq.com/).
-
-**4. Start Temporal server**
+**3. Start everything**
 ```bash
-temporal server start-dev
+docker compose up --build
 ```
 
-This starts Temporal locally and serves the UI at `http://localhost:8233`.
+First run takes ~2 minutes to pull images and build. Subsequent starts are fast.
 
-## Running the Pipeline
+**4. Open the app**
 
-**Terminal 1 — Start the Temporal worker:**
-```bash
-uv run python worker.py
-```
+| Service | URL |
+|---|---|
+| React Dashboard | http://localhost:5173 |
+| FastAPI Backend | http://localhost:8080/docs |
+| Temporal UI | http://localhost:8233 |
+| PostgreSQL | localhost:5433 |
 
-**Terminal 2 — Trigger a pipeline run:**
-```bash
-uv run python test_pipeline.py
-```
+## Running a Pipeline
 
-The test script starts a workflow for the topic `"AI Agents in production 2025"` and polls status every 5 seconds. You'll see it progress through:
+1. Open **http://localhost:5173**
+2. Enter a topic in the sidebar (e.g. `"AI Agents in production 2026"`)
+3. Click **Start Pipeline**
+4. Click the pipeline card to open the detail view and watch agents progress in real time
+5. Once the Writer Agent completes, the article appears for review
+6. Click **Approve & Publish** or **Reject & Request Revision** (with feedback)
 
-```
-running_research_and_competitor
-running_seo_agent
-writing_article
-waiting_for_approval
-```
+## Simulate Writer Failure (Temporal Durability Demo)
 
-**Approving the article**
+Toggle **"Simulate writer failure"** in the new pipeline form before submitting.
 
-Once the status reaches `waiting_for_approval`, send the approval signal:
+**What happens:**
+- Research Agent ✅ completes → result cached in Temporal event history
+- Competitor Agent ✅ completes → result cached in Temporal event history
+- Writer Agent ❌ fails on attempt 1 (artificial error)
+- Temporal automatically retries **only the Writer Agent** — Research and Competitor are **not re-run**; their results are served from the event history
+- Writer Agent ✅ succeeds on attempt 2
 
-```python
-import asyncio
-from temporalio.client import Client
-from workflows.content_pipeline import ContentPipelineWorkflow
+**What you see in the UI:**
+- Research and Competitor steps show green **"done"** + a **"cached"** pill
+- Writer step shows amber spinner with **"retrying"** badge
+- An info banner explains what Temporal is doing and why
 
-async def approve():
-    client = await Client.connect("localhost:7233")
-    handle = client.get_workflow_handle("YOUR_WORKFLOW_ID")
-    await handle.signal(ContentPipelineWorkflow.approve_article)
+**What you see in Temporal UI (`http://localhost:8233`):**
+- Activity 1 (`run_research_agent`) — Completed
+- Activity 2 (`run_competitor_agent`) — Completed
+- Activity 3 (`run_writer_agent`) — Failed (attempt 1), Completed (attempt 2)
 
-asyncio.run(approve())
-```
+This demonstrates Temporal's core durability guarantee: completed work is never repeated, even across failures and worker restarts.
 
-Or to request changes:
-```python
-await handle.signal(ContentPipelineWorkflow.reject_article, "Make the intro shorter")
-```
+## Rate Limit Handling
 
-You can also send signals directly from the **Temporal UI** at `http://localhost:8233`.
+Groq enforces per-minute and daily token quotas.
+
+| Retry-After | Behaviour |
+|---|---|
+| ≤ 60s (per-minute limit) | Activity sleeps inside Temporal with heartbeats, retries the HTTP call silently |
+| > 60s (quota exhaustion) | Activity fails fast with a clear error; Temporal retries with exponential backoff (30s → 60s → 120s → 240s) |
+
+If you see `Groq quota exhausted: Retry-After=Xs` in the Temporal UI, your daily quota is exhausted. Check [console.groq.com](https://console.groq.com) and wait for the quota to reset (usually top of the hour or midnight UTC).
 
 ## Project Structure
 
 ```
 ├── agents/
-│   ├── llm_client.py       # Groq API wrapper
-│   ├── research_agent.py   # Web research + summarisation
-│   ├── competitor_agent.py # Competitor analysis
-│   ├── seo_agent.py        # SEO brief generation
-│   └── writer_agent.py     # Article writing
+│   ├── llm_client.py           # Groq API wrapper with 429 handling + in-memory cache
+│   ├── research_agent.py       # DuckDuckGo search + Groq summarisation
+│   ├── competitor_agent.py     # Competitor content gap analysis
+│   └── writer_agent.py         # SEO strategy + article writing (1 LLM call)
 ├── workflows/
-│   └── content_pipeline.py # Temporal workflow definition
-├── backend/                # FastAPI backend (routes + services)
-├── worker.py               # Temporal worker entrypoint
-├── test_pipeline.py        # Pipeline trigger script
+│   └── content_pipeline.py     # Temporal workflow — orchestrates all agents
+├── backend/
+│   ├── main.py                 # FastAPI app entrypoint
+│   ├── models.py               # SQLAlchemy models
+│   ├── schemas.py              # Pydantic request/response schemas
+│   ├── routers/
+│   │   ├── pipelines.py        # Pipeline CRUD + signal endpoints
+│   │   └── health.py           # Health check
+│   └── services/
+│       ├── pipeline_service.py # Business logic + Temporal status sync
+│       └── temporal_service.py # Temporal client wrapper
+├── frontend/
+│   └── src/
+│       ├── pages/
+│       │   ├── Dashboard.jsx   # Pipeline list + new pipeline form
+│       │   └── PipelineDetail.jsx  # Agent progress + article + approval
+│       ├── components/
+│       │   ├── AgentProgress.jsx   # Step-by-step agent status (incl. retrying/failed)
+│       │   ├── PipelineCard.jsx    # Dashboard pipeline card
+│       │   └── StatusBadge.jsx     # Status pill component
+│       └── api/
+│           └── pipelines.js    # Axios API client
+├── docker/
+│   ├── Dockerfile.backend      # Python backend + worker image
+│   ├── Dockerfile.frontend     # Node/Vite frontend image
+│   └── init-db.sql             # Creates the content_pipeline database
+├── worker.py                   # Temporal worker entrypoint
+├── docker-compose.yml          # Full stack: db, temporal, backend, worker, frontend
 └── pyproject.toml
 ```
 
@@ -147,9 +167,32 @@ You can also send signals directly from the **Temporal UI** at `http://localhost
 | Signal | Description |
 |---|---|
 | `approve_article` | Marks the article as approved and completes the workflow |
-| `reject_article(feedback)` | Sends the article back with revision feedback |
+| `reject_article(feedback: str)` | Sends the article back with revision feedback |
 
 | Query | Description |
 |---|---|
 | `get_status` | Returns the current pipeline stage |
-| `get_seo_brief` | Returns the SEO brief generated by the SEO agent |
+| `get_article` | Returns the generated article (title, content, meta description, word count) |
+
+## Pipeline Statuses
+
+| Status | Meaning |
+|---|---|
+| `started` | Workflow created, about to begin |
+| `running_research_and_competitor` | Research + Competitor agents running in parallel |
+| `writing_article` | Writer Agent generating SEO strategy + article |
+| `waiting_for_approval` | Article ready, awaiting human decision |
+| `completed` | Article approved |
+| `rejected` | Article rejected with feedback |
+| `failed` | Workflow failed (retries exhausted) — see Temporal UI for trace |
+
+## Stopping the App
+
+```bash
+docker compose down
+```
+
+To also remove the PostgreSQL data volume (full reset):
+```bash
+docker compose down -v
+```

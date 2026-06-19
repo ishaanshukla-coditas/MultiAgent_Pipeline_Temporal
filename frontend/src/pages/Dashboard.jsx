@@ -49,9 +49,8 @@ export default function Dashboard() {
     }
   }
 
-  const running = pipelines.filter(p =>
-    !['completed', 'rejected'].includes(p.status)
-  ).length
+  const completed = pipelines.filter(p => p.status === 'completed').length
+  const failed = pipelines.filter(p => p.status === 'failed').length
 
   return (
     <div className="flex min-h-screen bg-gray-50">
@@ -146,14 +145,18 @@ export default function Dashboard() {
         </div>
 
         {/* Stats */}
-        <div className="mt-auto grid grid-cols-2 gap-3">
+        <div className="mt-auto grid grid-cols-3 gap-2">
           <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
             <p className="text-2xl font-bold text-gray-900">{pipelines.length}</p>
             <p className="text-xs text-gray-500 mt-0.5">Total</p>
           </div>
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-center">
-            <p className="text-2xl font-bold text-blue-700">{running}</p>
-            <p className="text-xs text-blue-500 mt-0.5">Running</p>
+          <div className="bg-green-50 border border-green-200 rounded-xl p-3 text-center">
+            <p className="text-2xl font-bold text-green-700">{completed}</p>
+            <p className="text-xs text-green-600 mt-0.5">Completed</p>
+          </div>
+          <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-center">
+            <p className="text-2xl font-bold text-red-700">{failed}</p>
+            <p className="text-xs text-red-500 mt-0.5">Failed</p>
           </div>
         </div>
       </aside>

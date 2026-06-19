@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class ResearchBrief:
     topic: str
     key_facts: str
-    sources: list[str]
+    sources: str  # comma-joined URLs — avoids generic list[str] decode issues in Python 3.14
 
 @activity.defn
 async def run_research_agent(topic: str) -> ResearchBrief:
@@ -70,7 +70,7 @@ async def run_research_agent(topic: str) -> ResearchBrief:
     summary = await call_llm(prompt=prompt, system=system)
 
     # Step 3 — Return structured brief
-    sources = [r["url"] for r in search_results]
+    sources = ", ".join(r["url"] for r in search_results)
 
     brief = ResearchBrief(
         topic=topic,

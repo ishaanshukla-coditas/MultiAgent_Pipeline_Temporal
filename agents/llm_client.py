@@ -69,7 +69,7 @@ async def _call_groq(prompt: str, system: str | None, json_mode: bool) -> str:
     body: dict = {
         "model": GROQ_MODEL,
         "messages": messages,
-        "temperature": 0.7,
+        "temperature": 0.3,
         "max_tokens": 4096,
     }
     if json_mode:

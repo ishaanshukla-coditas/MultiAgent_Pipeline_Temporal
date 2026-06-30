@@ -5,9 +5,10 @@ from workflows.content_pipeline import (
     ContentPipelineWorkflow,
     PipelineInput,
 )
+from queues import ORCHESTRATOR_QUEUE
 
 TEMPORAL_HOST = os.getenv("TEMPORAL_HOST", "localhost:7233")
-TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", "content-pipeline-queue")
+TASK_QUEUE = os.getenv("TEMPORAL_TASK_QUEUE", ORCHESTRATOR_QUEUE)
 
 _client: Optional[Client] = None
 

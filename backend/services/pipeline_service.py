@@ -9,7 +9,6 @@ from backend.services.temporal_service import (
     reject_pipeline,
 )
 
-
 ARTICLE_STATUSES = {"waiting_for_approval", "completed", "rejected"}
 TERMINAL_STATUSES = {"completed", "rejected", "failed"}
 

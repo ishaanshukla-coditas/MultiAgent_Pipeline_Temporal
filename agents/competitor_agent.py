@@ -1,10 +1,23 @@
 import logging
+import os
 from dataclasses import dataclass
-from duckduckgo_search import DDGS
+from tavily import TavilyClient
 from agents.llm_client import call_llm_json
 from temporalio import activity
 
 logger = logging.getLogger(__name__)
+
+_tavily: TavilyClient | None = None
+
+
+def _get_tavily() -> TavilyClient:
+    global _tavily
+    if _tavily is None:
+        api_key = os.environ.get("TAVILY_API_KEY")
+        if not api_key:
+            raise RuntimeError("TAVILY_API_KEY environment variable is not set")
+        _tavily = TavilyClient(api_key=api_key)
+    return _tavily
 
 
 @dataclass
@@ -31,14 +44,16 @@ async def run_competitor_agent(topic: str) -> CompetitorBrief:
     """
     logger.info(f"Competitor Agent starting for topic: {topic}")
 
-    competitor_results = []
-    with DDGS() as ddgs:
-        results = ddgs.text(f"{topic} complete guide article blog", max_results=5)
-        for r in results:
-            competitor_results.append({
-                "title": r["title"],
-                "snippet": r["body"],
-            })
+    client = _get_tavily()
+    response = client.search(
+        query=f"{topic} complete guide article blog",
+        max_results=5,
+        search_depth="basic",
+    )
+    competitor_results = [
+        {"title": r["title"], "snippet": r["content"]}
+        for r in response.get("results", [])
+    ]
 
     logger.info(f"Found {len(competitor_results)} competitor articles")
 

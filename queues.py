@@ -1,0 +1,5 @@
+ORCHESTRATOR_QUEUE = "orchestrator-queue"
+RESEARCH_QUEUE = "research-queue"
+COMPETITOR_QUEUE = "competitor-queue"
+WRITER_QUEUE = "writer-queue"
+NOTIFICATION_QUEUE = "notification-queue"

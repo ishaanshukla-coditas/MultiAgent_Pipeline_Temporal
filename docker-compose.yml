@@ -65,7 +65,7 @@ services:
         condition: service_healthy
     environment:
       - TEMPORAL_HOST=temporal:7233
-      - TEMPORAL_TASK_QUEUE=content-pipeline-queue
+      - TEMPORAL_TASK_QUEUE=orchestrator-queue
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/content_pipeline
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
@@ -79,8 +79,8 @@ services:
       retries: 10
       start_period: 20s
 
-  # ── Python Worker ───────────────────────────────────────
-  worker:
+  # ── Workers (one per task queue) ────────────────────────
+  worker-orchestrator:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
@@ -90,9 +90,94 @@ services:
         condition: service_healthy
     environment:
       - TEMPORAL_HOST=temporal:7233
-      - TEMPORAL_TASK_QUEUE=content-pipeline-queue
+      - WORKER_ROLE=orchestrator
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+
+  worker-research:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    command: uv run python worker.py
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - WORKER_ROLE=research
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+
+  worker-competitor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    command: uv run python worker.py
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - WORKER_ROLE=competitor
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+
+  worker-writer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    command: uv run python worker.py
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - WORKER_ROLE=writer
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+
+  # ── RabbitMQ ────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Web UI → http://localhost:15672 (guest/guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ── Notification Worker (Temporal activity: publish to RabbitMQ) ─
+  worker-notification:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    command: uv run python worker.py
+    depends_on:
+      temporal:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      - WORKER_ROLE=notification
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+
+  # ── Notification Consumer (standalone RabbitMQ subscriber) ──
+  notification-consumer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    command: uv run python notification_consumer.py
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
 
   # ── React Frontend ──────────────────────────────────────
   frontend:

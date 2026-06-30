@@ -1,37 +1,79 @@
 # Multi-Agent Content Pipeline
 
-A production-grade multi-agent pipeline that autonomously researches a topic, analyses competitors, and writes a full SEO-optimised article — orchestrated with [Temporal](https://temporal.io/) for durable execution and human-in-the-loop approval. Includes a React dashboard and a live demo of Temporal's activity-level fault tolerance.
+A production-grade multi-agent pipeline that autonomously researches a topic, analyses competitors, and writes a full SEO-optimised article — orchestrated with [Temporal](https://temporal.io/) for durable execution and [RabbitMQ](https://www.rabbitmq.com/) for decoupled event broadcasting. Includes a React dashboard and a live demo of Temporal's activity-level fault tolerance.
 
 ## Architecture
 
 ```
 Topic Input
     │
-    ├──► Research Agent  ──┐
-    │    (DuckDuckGo +     │  parallel
-    │     Groq LLM)        │
-    │                      ▼
-    └──► Competitor Agent ──► Writer Agent ──► Human Approval
-         (DuckDuckGo +        (SEO strategy       (Temporal Signal
-          Groq LLM)            + full article,      via React UI)
-                               1 LLM call)
+    ├──► fetch_industry_trends ──┐
+    ├──► fetch_key_facts        ─┼──► aggregate_research ──► Writer Agent ──► Human Approval
+    ├──► fetch_recent_news      ─┘         (1 LLM call)       (1 LLM call)    (Temporal Signal)
+    │                                                               │
+    └──► Competitor Agent ──────────────────────────────────────────┘
+         (Tavily + Groq)                        │
+                                                │ on article ready / approved / rejected
+                                                ▼
+                                          RabbitMQ Exchange
+                                                │
+                                    ┌───────────┴───────────┐
+                                    ▼                       ▼
+                             Email Consumer          Slack Consumer
+                          (article.ready)      (article.approved/rejected)
 ```
+
+### Why Temporal + RabbitMQ — not one or the other
+
+| Concern | Tool | Why |
+|---|---|---|
+| Run steps in order | Temporal | Tracks dependencies, retries failures |
+| Wait 48 hrs for human approval | Temporal | Only Temporal can pause a workflow |
+| Retry a failed activity | Temporal | Built-in retry policies with backoff |
+| Notify editor when article is ready | RabbitMQ | Fire-and-forget, decoupled from pipeline |
+| Add a new Slack/CMS consumer tomorrow | RabbitMQ | New consumer file — workflow never changes |
+| Isolate notification failures from pipeline | RabbitMQ | Consumer crash doesn't affect orchestration |
+
+## Agents
 
 | Agent | Role |
 |---|---|
-| **Research Agent** | Searches DuckDuckGo, summarises key facts and trends via Groq |
+| **fetch_industry_trends** | Tavily search — market trends and industry direction |
+| **fetch_key_facts** | Tavily search — statistics, data, hard facts |
+| **fetch_recent_news** | Tavily search — latest news and developments |
+| **aggregate_research** | Merges 3 search result sets into a `ResearchBrief` via one Groq call |
 | **Competitor Agent** | Finds competing content, identifies gaps and opportunities via Groq |
 | **Writer Agent** | Generates SEO keyword strategy + full article in a single Groq call |
+| **publish_pipeline_event** | Temporal activity that fires events into RabbitMQ |
 
-Research and Competitor agents run **in parallel**. Writer runs after both complete. The workflow pauses for human approval (approve or reject with feedback) before completing.
+The 3 research fetches and the Competitor Agent all run **in parallel** (4 concurrent activities). Once complete, `aggregate_research` runs, then the Writer. The workflow then publishes an `article.ready` event to RabbitMQ before pausing for human approval.
+
+## Task Queue Architecture
+
+Each worker type runs on its own dedicated Temporal task queue, enabling independent scaling:
+
+```
+orchestrator-queue   →  worker-orchestrator    (ContentPipelineWorkflow)
+research-queue       →  worker-research        (fetch_industry_trends, fetch_key_facts,
+                                                fetch_recent_news, aggregate_research)
+competitor-queue     →  worker-competitor      (run_competitor_agent)
+writer-queue         →  worker-writer          (run_writer_agent)
+notification-queue   →  worker-notification    (publish_pipeline_event → RabbitMQ)
+```
+
+Scale any bottleneck independently:
+```bash
+docker compose up --scale worker-research=3 --scale worker-writer=2
+```
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
 | Workflow orchestration | [Temporal](https://temporal.io/) |
+| Event broadcasting | [RabbitMQ](https://www.rabbitmq.com/) via [aio-pika](https://aio-pika.readthedocs.io/) |
 | LLM inference | [Groq API](https://console.groq.com/) — `llama-3.3-70b-versatile` |
-| Web search | [DuckDuckGo Search](https://pypi.org/project/duckduckgo-search/) |
+| Web search | [Tavily](https://tavily.com/) |
 | Backend API | [FastAPI](https://fastapi.tiangolo.com/) + SQLAlchemy + PostgreSQL |
 | Frontend | React + Vite + Tailwind CSS |
 | Containerisation | Docker Compose |
@@ -39,10 +81,9 @@ Research and Competitor agents run **in parallel**. Writer runs after both compl
 
 ## Prerequisites
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (includes Docker Compose)
-- A free [Groq API key](https://console.groq.com/) — sign up at console.groq.com
-
-That's it. Everything else runs inside Docker.
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+- A free [Groq API key](https://console.groq.com/)
+- A free [Tavily API key](https://app.tavily.com/)
 
 ## Quick Start
 
@@ -57,10 +98,11 @@ cd MultiAgent_Pipeline_Temporal
 cp .env.example .env
 ```
 
-Edit `.env` and add your Groq API key:
+Edit `.env` and fill in your keys:
 ```env
 GROQ_API_KEY=your_groq_api_key_here
 GROQ_MODEL=llama-3.3-70b-versatile
+TAVILY_API_KEY=your_tavily_api_key_here
 ```
 
 **3. Start everything**
@@ -77,61 +119,77 @@ First run takes ~2 minutes to pull images and build. Subsequent starts are fast.
 | React Dashboard | http://localhost:5173 |
 | FastAPI Backend | http://localhost:8080/docs |
 | Temporal UI | http://localhost:8233 |
+| RabbitMQ UI | http://localhost:15672 (guest / guest) |
 | PostgreSQL | localhost:5433 |
 
 ## Running a Pipeline
 
 1. Open **http://localhost:5173**
-2. Enter a topic in the sidebar (e.g. `"AI Agents in production 2026"`)
+2. Enter a topic (e.g. `"AI Agents in production 2026"`)
 3. Click **Start Pipeline**
-4. Click the pipeline card to open the detail view and watch agents progress in real time
-5. Once the Writer Agent completes, the article appears for review
-6. Click **Approve & Publish** or **Reject & Request Revision** (with feedback)
+4. Watch agents progress in real time on the pipeline detail view
+5. Once writing completes, the article appears for review
+6. Click **Approve & Publish** or **Reject & Request Revision**
+
+After each key event, the `notification-consumer` logs what it received from RabbitMQ:
+```
+📧  EMAIL  → 'Your Title' is ready for review
+✅  SLACK  → 'Your Title' approved and published!
+❌  SLACK  → 'Your Title' was rejected. Feedback: ...
+```
+
+Watch it live:
+```bash
+docker compose logs -f notification-consumer
+```
+
+## RabbitMQ Event Flow
+
+The workflow publishes three events over its lifetime:
+
+| Event | When | Routing Key |
+|---|---|---|
+| `article.ready` | After Writer Agent completes | `article.ready` |
+| `article.approved` | After human approves | `article.approved` |
+| `article.rejected` | After human rejects | `article.rejected` |
+
+All events go through the `pipeline_events` topic exchange. The `notification-consumer` subscribes to `article.*` and handles all three. To add a new consumer (e.g. a CMS publisher), create a new script that binds to the same exchange — no changes to the workflow needed.
 
 ## Simulate Writer Failure (Temporal Durability Demo)
 
 Toggle **"Simulate writer failure"** in the new pipeline form before submitting.
 
 **What happens:**
-- Research Agent ✅ completes → result cached in Temporal event history
+- Research fetches ✅ complete → results cached in Temporal event history
 - Competitor Agent ✅ completes → result cached in Temporal event history
+- aggregate_research ✅ completes → ResearchBrief cached in event history
 - Writer Agent ❌ fails on attempt 1 (artificial error)
-- Temporal automatically retries **only the Writer Agent** — Research and Competitor are **not re-run**; their results are served from the event history
+- Temporal automatically retries **only the Writer Agent** — all prior activities are **not re-run**
 - Writer Agent ✅ succeeds on attempt 2
 
-**What you see in the UI:**
-- Research and Competitor steps show green **"done"** + a **"cached"** pill
-- Writer step shows amber spinner with **"retrying"** badge
-- An info banner explains what Temporal is doing and why
-
 **What you see in Temporal UI (`http://localhost:8233`):**
-- Activity 1 (`run_research_agent`) — Completed
-- Activity 2 (`run_competitor_agent`) — Completed
-- Activity 3 (`run_writer_agent`) — Failed (attempt 1), Completed (attempt 2)
-
-This demonstrates Temporal's core durability guarantee: completed work is never repeated, even across failures and worker restarts.
+- Activities `fetch_industry_trends`, `fetch_key_facts`, `fetch_recent_news` — Completed
+- Activity `run_competitor_agent` — Completed
+- Activity `run_writer_agent` — Failed (attempt 1), Completed (attempt 2)
 
 ## Rate Limit Handling
-
-Groq enforces per-minute and daily token quotas.
 
 | Retry-After | Behaviour |
 |---|---|
 | ≤ 60s (per-minute limit) | Activity sleeps inside Temporal with heartbeats, retries the HTTP call silently |
-| > 60s (quota exhaustion) | Activity fails fast with a clear error; Temporal retries with exponential backoff (30s → 60s → 120s → 240s) |
-
-If you see `Groq quota exhausted: Retry-After=Xs` in the Temporal UI, your daily quota is exhausted. Check [console.groq.com](https://console.groq.com) and wait for the quota to reset (usually top of the hour or midnight UTC).
+| > 60s (quota exhaustion) | Activity fails fast; Temporal retries with exponential backoff (30s → 60s → 120s → 240s) |
 
 ## Project Structure
 
 ```
 ├── agents/
 │   ├── llm_client.py           # Groq API wrapper with 429 handling + in-memory cache
-│   ├── research_agent.py       # DuckDuckGo search + Groq summarisation
-│   ├── competitor_agent.py     # Competitor content gap analysis
-│   └── writer_agent.py         # SEO strategy + article writing (1 LLM call)
+│   ├── research_agent.py       # 3 parallel Tavily fetches + LLM aggregation
+│   ├── competitor_agent.py     # Competitor content gap analysis (Tavily + Groq)
+│   ├── writer_agent.py         # SEO strategy + article writing (1 LLM call)
+│   └── event_publisher.py      # Temporal activity: publishes events to RabbitMQ
 ├── workflows/
-│   └── content_pipeline.py     # Temporal workflow — orchestrates all agents
+│   └── content_pipeline.py     # Temporal workflow — orchestrates all agents + RabbitMQ handoff
 ├── backend/
 │   ├── main.py                 # FastAPI app entrypoint
 │   ├── models.py               # SQLAlchemy models
@@ -145,20 +203,22 @@ If you see `Groq quota exhausted: Retry-After=Xs` in the Temporal UI, your daily
 ├── frontend/
 │   └── src/
 │       ├── pages/
-│       │   ├── Dashboard.jsx   # Pipeline list + new pipeline form
+│       │   ├── Dashboard.jsx       # Pipeline list + new pipeline form
 │       │   └── PipelineDetail.jsx  # Agent progress + article + approval
 │       ├── components/
-│       │   ├── AgentProgress.jsx   # Step-by-step agent status (incl. retrying/failed)
+│       │   ├── AgentProgress.jsx   # Step-by-step agent status
 │       │   ├── PipelineCard.jsx    # Dashboard pipeline card
 │       │   └── StatusBadge.jsx     # Status pill component
 │       └── api/
-│           └── pipelines.js    # Axios API client
+│           └── pipelines.js        # Axios API client
 ├── docker/
 │   ├── Dockerfile.backend      # Python backend + worker image
 │   ├── Dockerfile.frontend     # Node/Vite frontend image
 │   └── init-db.sql             # Creates the content_pipeline database
-├── worker.py                   # Temporal worker entrypoint
-├── docker-compose.yml          # Full stack: db, temporal, backend, worker, frontend
+├── notification_consumer.py    # Standalone RabbitMQ consumer (email/Slack simulation)
+├── queues.py                   # Task queue name constants
+├── worker.py                   # Temporal worker — role selected via WORKER_ROLE env var
+├── docker-compose.yml          # Full stack: db, temporal, rabbitmq, backend, workers, frontend
 └── pyproject.toml
 ```
 
@@ -179,11 +239,11 @@ If you see `Groq quota exhausted: Retry-After=Xs` in the Temporal UI, your daily
 | Status | Meaning |
 |---|---|
 | `started` | Workflow created, about to begin |
-| `running_research_and_competitor` | Research + Competitor agents running in parallel |
-| `writing_article` | Writer Agent generating SEO strategy + article |
-| `waiting_for_approval` | Article ready, awaiting human decision |
-| `completed` | Article approved |
-| `rejected` | Article rejected with feedback |
+| `running_research_and_competitor` | 4 activities running in parallel |
+| `writing_article` | Writer Agent generating article |
+| `waiting_for_approval` | Article ready, `article.ready` event fired to RabbitMQ |
+| `completed` | Article approved, `article.approved` event fired to RabbitMQ |
+| `rejected` | Article rejected, `article.rejected` event fired to RabbitMQ |
 | `failed` | Workflow failed (retries exhausted) — see Temporal UI for trace |
 
 ## Stopping the App

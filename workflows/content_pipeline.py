@@ -6,9 +6,17 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from agents.research_agent import run_research_agent, ResearchBrief
+    from agents.research_agent import (
+        fetch_industry_trends,
+        fetch_key_facts,
+        fetch_recent_news,
+        aggregate_research,
+        ResearchBrief,
+    )
     from agents.competitor_agent import run_competitor_agent, CompetitorBrief
     from agents.writer_agent import run_writer_agent, ArticleOutput
+    from agents.event_publisher import publish_pipeline_event
+    from queues import RESEARCH_QUEUE, COMPETITOR_QUEUE, WRITER_QUEUE, NOTIFICATION_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -89,28 +97,44 @@ class ContentPipelineWorkflow:
             maximum_interval=timedelta(minutes=5),
         )
 
-        # Step 1 — Research + Competitor in parallel
+        # Step 1 — Research (3 parallel fetches) + Competitor, all in parallel
         self._status = "running_research_and_competitor"
-        workflow.logger.info("Research and Competitor agents starting in parallel")
+        workflow.logger.info("Research (fan-out) and Competitor starting in parallel")
 
-        research_brief, competitor_brief = await asyncio.gather(
-            workflow.execute_activity(
-                run_research_agent,
-                input.topic,
-                start_to_close_timeout=timedelta(minutes=10),
-                heartbeat_timeout=timedelta(seconds=60),
-                retry_policy=agent_retry_policy,
-            ),
+        _activity_opts = dict(
+            task_queue=RESEARCH_QUEUE,
+            start_to_close_timeout=timedelta(minutes=5),
+            heartbeat_timeout=timedelta(seconds=60),
+            retry_policy=agent_retry_policy,
+        )
+
+        trends_text, facts_text, news_raw, competitor_brief = await asyncio.gather(
+            workflow.execute_activity(fetch_industry_trends, input.topic, **_activity_opts),
+            workflow.execute_activity(fetch_key_facts, input.topic, **_activity_opts),
+            workflow.execute_activity(fetch_recent_news, input.topic, **_activity_opts),
             workflow.execute_activity(
                 run_competitor_agent,
                 input.topic,
+                task_queue=COMPETITOR_QUEUE,
                 start_to_close_timeout=timedelta(minutes=10),
                 heartbeat_timeout=timedelta(seconds=60),
                 retry_policy=agent_retry_policy,
             ),
         )
 
-        workflow.logger.info("Research and Competitor completed")
+        workflow.logger.info("Research fetches and Competitor completed — aggregating research")
+
+        # Step 1b — Aggregate the 3 research results into one brief (single LLM call)
+        research_brief: ResearchBrief = await workflow.execute_activity(
+            aggregate_research,
+            args=[input.topic, trends_text, facts_text, news_raw],
+            task_queue=RESEARCH_QUEUE,
+            start_to_close_timeout=timedelta(minutes=10),
+            heartbeat_timeout=timedelta(seconds=60),
+            retry_policy=agent_retry_policy,
+        )
+
+        workflow.logger.info("Research aggregation completed")
 
         # Step 2 — Writer agent (SEO strategy + article in one call)
         self._status = "writing_article"
@@ -119,6 +143,7 @@ class ContentPipelineWorkflow:
         article: ArticleOutput = await workflow.execute_activity(
             run_writer_agent,
             args=[input.topic, research_brief, competitor_brief, input.simulate_writer_failure],
+            task_queue=WRITER_QUEUE,
             start_to_close_timeout=timedelta(minutes=15),
             heartbeat_timeout=timedelta(seconds=60),
             retry_policy=writer_retry_policy,
@@ -127,7 +152,20 @@ class ContentPipelineWorkflow:
         self._article = article
         workflow.logger.info(f"Article ready: {article.title}")
 
-        # Step 3 — Human approval gate
+        # Step 3 — Notify via RabbitMQ that article is ready for review.
+        # Temporal fires this and moves on immediately — does not wait for
+        # any consumer. This is the handoff to the RabbitMQ world.
+        _notify_opts = dict(
+            task_queue=NOTIFICATION_QUEUE,
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        await workflow.execute_activity(
+            publish_pipeline_event,
+            args=["article.ready", {"topic": input.topic, "title": article.title}],
+            **_notify_opts,
+        )
+
+        # Step 4 — Human approval gate (only Temporal can do this)
         self._status = "waiting_for_approval"
         workflow.logger.info("Waiting for human approval")
 
@@ -135,6 +173,24 @@ class ContentPipelineWorkflow:
             lambda: self._approved or self._rejection_feedback is not None,
             timeout=timedelta(hours=48),
         )
+
+        # Step 5 — Notify outcome via RabbitMQ
+        if self._rejection_feedback:
+            await workflow.execute_activity(
+                publish_pipeline_event,
+                args=["article.rejected", {
+                    "topic": input.topic,
+                    "title": article.title,
+                    "feedback": self._rejection_feedback,
+                }],
+                **_notify_opts,
+            )
+        else:
+            await workflow.execute_activity(
+                publish_pipeline_event,
+                args=["article.approved", {"topic": input.topic, "title": article.title}],
+                **_notify_opts,
+            )
 
         self._status = "rejected" if self._rejection_feedback else "completed"
         workflow.logger.info(f"Pipeline finished with status: {self._status}")

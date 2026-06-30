@@ -1,23 +1,10 @@
 import logging
-import os
 from dataclasses import dataclass
-from tavily import TavilyClient
+from agents.tavily_client import search as tavily_search
 from agents.llm_client import call_llm_json
 from temporalio import activity
 
 logger = logging.getLogger(__name__)
-
-_tavily: TavilyClient | None = None
-
-
-def _get_tavily() -> TavilyClient:
-    global _tavily
-    if _tavily is None:
-        api_key = os.environ.get("TAVILY_API_KEY")
-        if not api_key:
-            raise RuntimeError("TAVILY_API_KEY environment variable is not set")
-        _tavily = TavilyClient(api_key=api_key)
-    return _tavily
 
 
 @dataclass
@@ -44,25 +31,22 @@ async def run_competitor_agent(topic: str) -> CompetitorBrief:
     """
     logger.info(f"Competitor Agent starting for topic: {topic}")
 
-    client = _get_tavily()
-    response = client.search(
-        query=f"{topic} complete guide article blog",
-        max_results=5,
-        search_depth="basic",
-    )
-    competitor_results = [
-        {"title": r["title"], "snippet": r["content"]}
-        for r in response.get("results", [])
-    ]
+    snippets, _ = tavily_search(f"{topic} complete guide article blog")
+    competitor_results = []
+    for block in snippets.split("\n\n"):
+        lines = block.strip().splitlines()
+        title = lines[0].replace("Title: ", "") if lines else ""
+        content = lines[1].replace("Content: ", "") if len(lines) > 1 else ""
+        if title:
+            competitor_results.append({"title": title, "snippet": content})
 
     logger.info(f"Found {len(competitor_results)} competitor articles")
 
-    competitor_text = "\n\n".join([
+    competitor_text = "\n\n".join(
         f"Article: {r['title']}\nContent: {r['snippet']}"
         for r in competitor_results
-    ])
+    )
 
-    # Single JSON call replaces the old analysis call + opportunities call
     prompt = f"""Topic: {topic}
 
 Existing articles about this topic:
@@ -77,7 +61,6 @@ Return a JSON object with exactly these two keys:
     data = await call_llm_json(prompt=prompt, system=_SYSTEM)
 
     # LLM sometimes returns a list for these fields despite the prompt asking for strings.
-    # Coerce to str so Temporal's dataclass deserializer never sees a type mismatch.
     content_gaps = data.get("content_gaps", "")
     opportunities = data.get("opportunities", "")
     if isinstance(content_gaps, list):
@@ -85,7 +68,7 @@ Return a JSON object with exactly these two keys:
     if isinstance(opportunities, list):
         opportunities = "\n".join(f"- {item}" for item in opportunities)
 
-    logger.info("Competitor Agent completed (1 LLM call, was 2)")
+    logger.info("Competitor Agent completed")
     return CompetitorBrief(
         topic=topic,
         content_gaps=content_gaps,

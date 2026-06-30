@@ -20,6 +20,8 @@ with workflow.unsafe.imports_passed_through():
 
 logger = logging.getLogger(__name__)
 
+MAX_REWRITES = 3
+
 
 @dataclass
 class PipelineInput:
@@ -78,9 +80,6 @@ class ContentPipelineWorkflow:
 
     @workflow.run
     async def run(self, input: PipelineInput) -> PipelineResult:
-        # Short 429s (≤60s) are handled inside the activity via sleep+heartbeat.
-        # Long 429s (quota exhaustion) surface here as ApplicationError so Temporal
-        # retries with backoff — initial_interval gives the first breathing room.
         agent_retry_policy = RetryPolicy(
             initial_interval=timedelta(seconds=30),
             backoff_coefficient=2.0,
@@ -88,13 +87,16 @@ class ContentPipelineWorkflow:
             maximum_interval=timedelta(minutes=5),
         )
 
-        # Writer gets more Temporal-level attempts to accommodate the simulated
-        # failure scenario (attempt 1 = artificial fail, attempt 2 = real call).
         writer_retry_policy = RetryPolicy(
             initial_interval=timedelta(seconds=30),
             backoff_coefficient=2.0,
             maximum_attempts=5,
             maximum_interval=timedelta(minutes=5),
+        )
+
+        _notify_opts = dict(
+            task_queue=NOTIFICATION_QUEUE,
+            start_to_close_timeout=timedelta(seconds=30),
         )
 
         # Step 1 — Research (3 parallel fetches) + Competitor, all in parallel
@@ -124,7 +126,7 @@ class ContentPipelineWorkflow:
 
         workflow.logger.info("Research fetches and Competitor completed — aggregating research")
 
-        # Step 1b — Aggregate the 3 research results into one brief (single LLM call)
+        # Step 1b — Aggregate the 3 research results into one brief
         research_brief: ResearchBrief = await workflow.execute_activity(
             aggregate_research,
             args=[input.topic, trends_text, facts_text, news_raw],
@@ -136,64 +138,89 @@ class ContentPipelineWorkflow:
 
         workflow.logger.info("Research aggregation completed")
 
-        # Step 2 — Writer agent (SEO strategy + article in one call)
-        self._status = "writing_article"
-        workflow.logger.info("Writer Agent starting (SEO + article, 1 LLM call)")
+        # Step 2 — Write article (loops on rejection, up to MAX_REWRITES times)
+        feedback: str | None = None
+        rewrite_count = 0
 
-        article: ArticleOutput = await workflow.execute_activity(
-            run_writer_agent,
-            args=[input.topic, research_brief, competitor_brief, input.simulate_writer_failure],
-            task_queue=WRITER_QUEUE,
-            start_to_close_timeout=timedelta(minutes=15),
-            heartbeat_timeout=timedelta(seconds=60),
-            retry_policy=writer_retry_policy,
-        )
+        while True:
+            if feedback:
+                self._status = "rewriting_article"
+                workflow.logger.info(f"Rewriting article (attempt {rewrite_count}/{MAX_REWRITES})")
+            else:
+                self._status = "writing_article"
+                workflow.logger.info("Writer Agent starting")
 
-        self._article = article
-        workflow.logger.info(f"Article ready: {article.title}")
+            article: ArticleOutput = await workflow.execute_activity(
+                run_writer_agent,
+                args=[input.topic, research_brief, competitor_brief, input.simulate_writer_failure, feedback],
+                task_queue=WRITER_QUEUE,
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(seconds=60),
+                retry_policy=writer_retry_policy,
+            )
 
-        # Step 3 — Notify via RabbitMQ that article is ready for review.
-        # Temporal fires this and moves on immediately — does not wait for
-        # any consumer. This is the handoff to the RabbitMQ world.
-        _notify_opts = dict(
-            task_queue=NOTIFICATION_QUEUE,
-            start_to_close_timeout=timedelta(seconds=30),
-        )
-        await workflow.execute_activity(
-            publish_pipeline_event,
-            args=["article.ready", {"topic": input.topic, "title": article.title}],
-            **_notify_opts,
-        )
+            self._article = article
+            workflow.logger.info(f"Article ready: {article.title} ({article.word_count} words)")
 
-        # Step 4 — Human approval gate (only Temporal can do this)
-        self._status = "waiting_for_approval"
-        workflow.logger.info("Waiting for human approval")
+            # Notify RabbitMQ — fire and forget
+            await workflow.execute_activity(
+                publish_pipeline_event,
+                args=["article.ready", {"topic": input.topic, "title": article.title}],
+                **_notify_opts,
+            )
 
-        await workflow.wait_condition(
-            lambda: self._approved or self._rejection_feedback is not None,
-            timeout=timedelta(hours=48),
-        )
+            # Wait for human decision (up to 48 hours)
+            self._status = "waiting_for_approval"
+            self._approved = False
+            self._rejection_feedback = None
+            workflow.logger.info("Waiting for human approval")
 
-        # Step 5 — Notify outcome via RabbitMQ
-        if self._rejection_feedback:
+            await workflow.wait_condition(
+                lambda: self._approved or self._rejection_feedback is not None,
+                timeout=timedelta(hours=48),
+            )
+
+            if self._approved:
+                # Approved — publish and exit loop
+                await workflow.execute_activity(
+                    publish_pipeline_event,
+                    args=["article.approved", {"topic": input.topic, "title": article.title}],
+                    **_notify_opts,
+                )
+                self._status = "completed"
+                workflow.logger.info("Pipeline completed — article approved")
+                break
+
+            # Rejected — check if we've hit the rewrite limit
+            rewrite_count += 1
+            feedback = self._rejection_feedback
+            workflow.logger.info(f"Article rejected (rewrite {rewrite_count}/{MAX_REWRITES}): {feedback}")
+
+            if rewrite_count >= MAX_REWRITES:
+                # Max rewrites reached — end the workflow as rejected
+                await workflow.execute_activity(
+                    publish_pipeline_event,
+                    args=["article.rejected", {
+                        "topic": input.topic,
+                        "title": article.title,
+                        "feedback": feedback,
+                    }],
+                    **_notify_opts,
+                )
+                self._status = "rejected"
+                workflow.logger.info(f"Pipeline rejected after {MAX_REWRITES} rewrites")
+                break
+
+            # Publish rejected event and loop back to rewrite
             await workflow.execute_activity(
                 publish_pipeline_event,
                 args=["article.rejected", {
                     "topic": input.topic,
                     "title": article.title,
-                    "feedback": self._rejection_feedback,
+                    "feedback": feedback,
                 }],
                 **_notify_opts,
             )
-        else:
-            await workflow.execute_activity(
-                publish_pipeline_event,
-                args=["article.approved", {"topic": input.topic, "title": article.title}],
-                **_notify_opts,
-            )
-
-        self._status = "rejected" if self._rejection_feedback else "completed"
-        workflow.logger.info(f"Pipeline finished with status: {self._status}")
 
         return PipelineResult(
             topic=input.topic,
